@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Squash Logger</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #16181d; --muted: #5d6470; --line: #dde1e7;
+    --accent: #1f6feb; --accent-text: #ffffff; --ok: #1a7f37; --warn: #b35900; --bad: #cf222e;
+    --bar: #e6eaf0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1115; --card: #171a21; --text: #e8eaee; --muted: #9aa3af; --line: #2a2f39;
+      --accent: #4c8dff; --accent-text: #0b0d11; --ok: #3fb950; --warn: #e3a008; --bad: #f85149;
+      --bar: #232833;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1115; --card: #171a21; --text: #e8eaee; --muted: #9aa3af; --line: #2a2f39;
+    --accent: #4c8dff; --accent-text: #0b0d11; --ok: #3fb950; --warn: #e3a008; --bad: #f85149;
+    --bar: #232833;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+  }
+  main { max-width: 560px; margin: 0 auto; display: grid; gap: 14px; }
+  h1 { font-size: 22px; margin: 4px 0 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  button {
+    font: inherit; font-weight: 600; border: 0; border-radius: 10px; padding: 12px 16px;
+    background: var(--accent); color: var(--accent-text); flex: 1 1 auto; min-height: 46px;
+  }
+  button.secondary { background: var(--bar); color: var(--text); }
+  button.danger { background: var(--bad); color: #fff; }
+  button:disabled { opacity: .4; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; margin-top: 10px; }
+  .stat .k { color: var(--muted); font-size: 13px; }
+  .stat .v { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .status { font-weight: 600; }
+  .status.ok { color: var(--ok); } .status.warn { color: var(--warn); } .status.bad { color: var(--bad); }
+  .bar { height: 10px; background: var(--bar); border-radius: 6px; overflow: hidden; margin: 10px 0 4px; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+  .muted { color: var(--muted); font-size: 14px; }
+  ul { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 8px; }
+  li { border-top: 1px solid var(--line); padding-top: 8px; }
+  li .row button { padding: 8px 10px; min-height: 38px; font-size: 14px; }
+  pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; color: var(--muted); max-height: 180px; overflow: auto; margin: 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Squash Logger</h1>
+
+  <section class="card">
+    <div class="row">
+      <button id="connect">Connect</button>
+      <button id="disconnect" class="secondary" disabled>Disconnect</button>
+    </div>
+    <p id="conn" class="status muted">Not connected. Bluetooth is off on the logger while it records; stop recording first.</p>
+    <div class="stats">
+      <div class="stat"><div class="k">Recordings</div><div class="v" id="sessions">–</div></div>
+      <div class="stat"><div class="k">Used</div><div class="v" id="used">–</div></div>
+      <div class="stat"><div class="k">Recording time left</div><div class="v" id="free">–</div></div>
+      <div class="stat"><div class="k">Battery</div><div class="v" id="vbat">–</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="row">
+      <button id="download" disabled>Download</button>
+      <button id="erase" class="danger" disabled>Erase logger</button>
+    </div>
+    <div class="bar"><div id="progress"></div></div>
+    <p id="dlstatus" class="status muted">Erase unlocks only after a download is verified and stored on this phone.</p>
+    <div class="row"><button id="record" class="secondary" disabled>Start recording</button></div>
+    <p class="muted">Starting from here disconnects the phone. Stop with the logger's UserSw button.</p>
+  </section>
+
+  <section class="card">
+    <div class="row" style="justify-content: space-between">
+      <strong>Stored on this phone</strong>
+    </div>
+    <p class="muted">Verified downloads are kept here until you delete them. Save or share them to get the file off the phone.</p>
+    <ul id="stored"></ul>
+  </section>
+
+  <section class="card">
+    <strong>Log</strong>
+    <pre id="log"></pre>
+  </section>
+</main>
+
+<script>
+const NUS = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";   // phone writes commands
+const NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";   // logger notifies replies and data
+
+const $ = id => document.getElementById(id);
+const log = msg => { const el = $("log"); el.textContent = `${new Date().toLocaleTimeString()}  ${msg}\n` + el.textContent; };
+
+// ---------- CRC32 (zlib), must match the firmware ----------
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[i] = c >>> 0; }
+  return t;
+})();
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+const hex8 = n => n.toString(16).toUpperCase().padStart(8, "0");
+
+// ---------- storage: every verified download is kept in IndexedDB first ----------
+function db() {
+  return new Promise((ok, fail) => {
+    const r = indexedDB.open("squash-logger", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("logs", { keyPath: "name" });
+    r.onsuccess = () => ok(r.result);
+    r.onerror = () => fail(r.error);
+  });
+}
+async function dbDo(mode, fn) {
+  const d = await db();
+  return new Promise((ok, fail) => {
+    const tx = d.transaction("logs", mode);
+    const res = fn(tx.objectStore("logs"));
+    tx.oncomplete = () => ok(res && res.result);
+    tx.onerror = () => fail(tx.error);
+  });
+}
+const storeLog = rec => dbDo("readwrite", s => s.put(rec));
+const allLogs = () => dbDo("readonly", s => s.getAll());
+const deleteLog = name => dbDo("readwrite", s => s.delete(name));
+async function hasLog(name, crc) {
+  const d = await db();
+  return new Promise(ok => {
+    const r = d.transaction("logs").objectStore("logs").get(name);
+    r.onsuccess = () => ok(!!r.result && r.result.crc === crc && crc32(new Uint8Array(r.result.data)) === crc);
+    r.onerror = () => ok(false);
+  });
+}
+
+// ---------- Bluetooth link ----------
+let device = null, rx = null, tx = null;
+let inbuf = new Uint8Array(0);
+let waiter = null;
+let verified = null;          // {name, crc} of the last verified + stored download
+
+function onData(ev) {
+  const chunk = new Uint8Array(ev.target.value.buffer);
+  const merged = new Uint8Array(inbuf.length + chunk.length);
+  merged.set(inbuf); merged.set(chunk, inbuf.length);
+  inbuf = merged;
+  if (waiter) waiter();
+}
+function waitFor(pred, ms) {
+  return new Promise((ok, fail) => {
+    const done = () => { const v = pred(); if (v !== undefined) { clearTimeout(t); waiter = null; ok(v); } };
+    const t = setTimeout(() => { waiter = null; fail(new Error("timed out waiting for the logger")); }, ms);
+    waiter = done; done();
+  });
+}
+const takeLine = ms => waitFor(() => {
+  const i = inbuf.indexOf(10);
+  if (i < 0) return undefined;
+  const line = new TextDecoder().decode(inbuf.slice(0, i)).trim();
+  inbuf = inbuf.slice(i + 1);
+  return line;
+}, ms);
+const takeBytes = (n, ms, progress) => waitFor(() => {
+  progress && progress(Math.min(inbuf.length, n) / n);
+  if (inbuf.length < n) return undefined;
+  const data = inbuf.slice(0, n);
+  inbuf = inbuf.slice(n);
+  return data;
+}, ms);
+
+async function sendCmd(text, withResponse = false) {
+  const bytes = new TextEncoder().encode(text);
+  if (withResponse && rx.writeValueWithResponse) await rx.writeValueWithResponse(bytes);
+  else if (!withResponse && rx.writeValueWithoutResponse) await rx.writeValueWithoutResponse(bytes);
+  else await rx.writeValue(bytes);
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function setConnected(on, msg, cls = "") {
+  $("connect").disabled = on;
+  $("disconnect").disabled = !on;
+  $("download").disabled = !on;
+  $("record").disabled = !on;
+  $("erase").disabled = true;
+  $("conn").className = "status " + cls;
+  $("conn").textContent = msg;
+}
+
+async function connect() {
+  if (!navigator.bluetooth) {
+    setConnected(false, "This browser has no Web Bluetooth. On Android use Chrome (or a Chromium browser with it enabled); on iPhone, Bluefy.", "bad");
+    return;
+  }
+  try {
+    device = await navigator.bluetooth.requestDevice({ filters: [{ name: "SquashLogger" }], optionalServices: [NUS] });
+    device.addEventListener("gattserverdisconnected", () => { setConnected(false, "Disconnected.", "warn"); log("disconnected"); });
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(NUS);
+    rx = await svc.getCharacteristic(NUS_RX);
+    tx = await svc.getCharacteristic(NUS_TX);
+    tx.addEventListener("characteristicvaluechanged", onData);
+    await tx.startNotifications();
+    inbuf = new Uint8Array(0);
+    setConnected(true, "Connected.", "ok");
+    log("connected");
+    await refreshStatus();
+  } catch (e) {
+    setConnected(false, "Could not connect: " + e.message, "bad");
+    log("connect failed: " + e.message);
+  }
+}
+
+async function refreshStatus() {
+  inbuf = new Uint8Array(0);
+  await sendCmd("S");
+  const line = await takeLine(5000);
+  if (!line.startsWith("STAT")) { log("unexpected: " + line); return null; }
+  const st = Object.fromEntries(line.split(" ").slice(1).map(kv => kv.split("=")).map(([k, v]) => [k, Number(v)]));
+  $("sessions").textContent = st.sessions;
+  $("used").textContent = `${(st.used / 1024).toFixed(0)} KB`;
+  $("free").textContent = `${st.free_s} s`;
+  const pct = Math.max(0, Math.min(100, (st.vbat_mv - 3300) / (4200 - 3300) * 100));
+  $("vbat").textContent = st.vbat_mv > 4300 ? "USB" : `${(st.vbat_mv / 1000).toFixed(2)} V (~${pct.toFixed(0)}%)`;
+  log(line);
+  return st;
+}
+
+async function download() {
+  $("download").disabled = $("erase").disabled = true;
+  $("progress").style.width = "0";
+  verified = null;
+  try {
+    const st = await refreshStatus();
+    if (st && st.used === 0) { $("dlstatus").textContent = "Nothing recorded yet."; $("download").disabled = false; return; }
+    inbuf = new Uint8Array(0);
+    await sendCmd("d4096");
+    const header = await takeLine(10000);
+    if (!header.startsWith("DUMP")) throw new Error("unexpected reply: " + header);
+    const [n, block] = header.split(" ").slice(1).map(Number);
+    const t0 = performance.now();
+    $("dlstatus").className = "status muted";
+    // The logger sends one block, then waits for K (got it) or R (resend). A block that arrives short
+    // means notifications were dropped: wait for silence, discard, ask again; after repeated losses
+    // ask for smaller notifications ("R100"), which hosts that drop full-size ones handle fine.
+    const data = new Uint8Array(n);
+    let got = 0, resends = 0, streak = 0;
+    while (got < n) {
+      const len = Math.min(block, n - got);
+      try {
+        const part = await takeBytes(len, 2000);
+        data.set(part, got);
+        got += len;
+        streak = 0;
+        await sendCmd("K", true);
+      } catch (e) {
+        if (!device?.gatt?.connected) throw new Error("Bluetooth link dropped during the download");
+        await sleep(300);
+        inbuf = new Uint8Array(0);
+        resends++;
+        streak++;
+        if (resends > 50) throw new Error("too many resends, giving up");
+        await sendCmd(streak >= 2 ? "R100" : "R", true);
+        if (streak === 2) log("repeated short blocks: switching to 100-byte notifications");
+      }
+      $("progress").style.width = `${(got / n * 100).toFixed(1)}%`;
+      $("dlstatus").textContent = `Downloading ${(got / 1024).toFixed(0)} / ${(n / 1024).toFixed(0)} KB` +
+        (resends ? ` (${resends} resends)` : "");
+    }
+    const secs = (performance.now() - t0) / 1000;
+    const trailer = await takeLine(10000);
+    if (!trailer.startsWith("END")) throw new Error("no CRC trailer: " + trailer);
+    const want = parseInt(trailer.split(" ")[1], 16) >>> 0;
+    const have = crc32(data);
+    log(`${n} bytes in ${secs.toFixed(1)} s (${(n / secs / 1024).toFixed(1)} KB/s), CRC logger ${hex8(want)} phone ${hex8(have)}`);
+    if (have !== want) throw new Error(`CRC mismatch (logger ${hex8(want)}, phone ${hex8(have)}): download corrupted. Nothing erased; try again.`);
+
+    const stamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
+    const name = `squash-${stamp}.bin`;
+    await storeLog({ name, crc: have, size: n, saved: Date.now(), data: data.buffer });
+    if (!(await hasLog(name, have))) throw new Error("stored copy failed its check; not unlocking erase");
+    verified = { name, crc: have };
+    $("dlstatus").className = "status ok";
+    $("dlstatus").textContent = `Verified (CRC ${hex8(have)}) and stored as ${name}. Save or share it below, then erase.`;
+    $("erase").disabled = false;
+    await renderStored();
+  } catch (e) {
+    $("dlstatus").className = "status bad";
+    $("dlstatus").textContent = e.message;
+    log("download failed: " + e.message);
+  } finally {
+    $("download").disabled = !device?.gatt?.connected;
+  }
+}
+
+async function erase() {
+  if (!verified) return;
+  if (!confirm(`Erase the logger? Its data is verified and stored on this phone as ${verified.name}.`)) return;
+  $("erase").disabled = $("download").disabled = true;
+  try {
+    inbuf = new Uint8Array(0);
+    await sendCmd("E" + hex8(verified.crc), true);
+    for (;;) {
+      const line = await takeLine(60000);
+      log(line);
+      if (line.startsWith("ERR")) throw new Error(line);
+      if (line.startsWith("ERASE done")) break;
+    }
+    $("dlstatus").className = "status ok";
+    $("dlstatus").textContent = "Logger erased. Ready to record.";
+    $("progress").style.width = "0";
+    verified = null;
+    await refreshStatus();
+  } catch (e) {
+    $("dlstatus").className = "status bad";
+    $("dlstatus").textContent = "Erase refused or failed: " + e.message;
+  } finally {
+    $("download").disabled = !device?.gatt?.connected;
+  }
+}
+
+async function startRecording() {
+  if (!confirm("Start recording? The phone will disconnect; stop with the logger's UserSw button.")) return;
+  await sendCmd("r", true);
+  log("recording started");
+}
+
+// ---------- stored downloads ----------
+function fileOf(rec) { return new File([rec.data], rec.name, { type: "application/octet-stream" }); }
+async function saveFile(rec) {
+  const url = URL.createObjectURL(new Blob([rec.data], { type: "application/octet-stream" }));
+  const a = Object.assign(document.createElement("a"), { href: url, download: rec.name });
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+async function shareFile(rec) {
+  const f = fileOf(rec);
+  if (navigator.canShare && navigator.canShare({ files: [f] })) {
+    try { await navigator.share({ files: [f], title: rec.name }); } catch (e) { log("share: " + e.message); }
+  } else {
+    alert("Sharing files isn't supported in this browser; use Save instead.");
+  }
+}
+async function renderStored() {
+  const list = $("stored");
+  const recs = (await allLogs()).sort((a, b) => b.saved - a.saved);
+  list.innerHTML = recs.length ? "" : '<li class="muted">None yet.</li>';
+  for (const rec of recs) {
+    const li = document.createElement("li");
+    li.innerHTML = `<div>${rec.name}</div><div class="muted">${(rec.size / 1024).toFixed(0)} KB · CRC ${hex8(rec.crc)}</div>
+      <div class="row" style="margin-top:6px"><button class="secondary">Save</button><button class="secondary">Share</button><button class="secondary">Delete</button></div>`;
+    const [save, share, del] = li.querySelectorAll("button");
+    save.onclick = () => saveFile(rec);
+    share.onclick = () => shareFile(rec);
+    del.onclick = async () => {
+      if (!confirm(`Delete ${rec.name} from this phone? This can't be undone.`)) return;
+      await deleteLog(rec.name);
+      renderStored();
+    };
+    list.appendChild(li);
+  }
+}
+
+$("connect").onclick = connect;
+$("disconnect").onclick = () => device?.gatt?.disconnect();
+$("download").onclick = download;
+$("erase").onclick = erase;
+$("record").onclick = startRecording;
+renderStored().catch(e => log("storage unavailable: " + e.message));
+</script>
+</body>
+</html>
