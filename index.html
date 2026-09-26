@@ -218,6 +218,12 @@ async function connect() {
     setConnected(true, "Connected.", "ok");
     log("connected");
     await refreshStatus();
+    // Ask for a 15 ms connection interval once the link has settled. Requesting it at the same time
+    // as the MTU/PHY/data-length negotiation can leave the link on small packets (~30 KB/s).
+    await sleep(500);
+    inbuf = new Uint8Array(0);
+    await sendCmd("C12", true);
+    log(await takeLine(3000));
   } catch (e) {
     setConnected(false, "Could not connect: " + e.message, "bad");
     log("connect failed: " + e.message);
@@ -247,7 +253,7 @@ async function download() {
     const st = await refreshStatus();
     if (st && st.used === 0) { $("dlstatus").textContent = "Nothing recorded yet."; $("download").disabled = false; return; }
     inbuf = new Uint8Array(0);
-    await sendCmd("d4096");
+    await sendCmd("d8192");
     const header = await takeLine(10000);
     if (!header.startsWith("DUMP")) throw new Error("unexpected reply: " + header);
     const [n, block] = header.split(" ").slice(1).map(Number);
@@ -293,6 +299,7 @@ async function download() {
     await storeLog({ name, crc: have, size: n, saved: Date.now(), data: data.buffer });
     if (!(await hasLog(name, have))) throw new Error("stored copy failed its check; not unlocking erase");
     verified = { name, crc: have };
+    await logDiagnostics();
     $("dlstatus").className = "status ok";
     $("dlstatus").textContent = `Verified (CRC ${hex8(have)}) and stored as ${name}. Save or share it below, then erase.`;
     $("erase").disabled = false;
@@ -304,6 +311,19 @@ async function download() {
   } finally {
     $("download").disabled = !device?.gatt?.connected;
   }
+}
+
+// The logger's own record of the download (resends, packet size, connection interval) for troubleshooting
+async function logDiagnostics() {
+  try {
+    inbuf = new Uint8Array(0);
+    await sendCmd("i", true);
+    for (let i = 0; i < 10; i++) {
+      const line = await takeLine(3000);
+      if (line.includes("BLE dump")) log(line.replace("INFO ", "logger: "));
+      if (line.includes("BLE disconnect")) break;
+    }
+  } catch (e) { log("diagnostics unavailable: " + e.message); }
 }
 
 async function erase() {
